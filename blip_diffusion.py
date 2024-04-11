@@ -273,15 +273,13 @@ class BlipDiffusion(BaseModel):
         )
 
         # Get the text embedding for conditioning
-        # input_ids = self.tokenizer(
-        #     samples["caption"],
-        #     padding="do_not_pad",
-        #     truncation=True,
-        #     max_length=self.tokenizer.model_max_length,
-        #     return_tensors="pt",
-        # ).input_ids.to(self.device)
-
-        input_ids = self.tokenizer.encode(samples["caption"], return_tensors="pt", truncation=True, max_length=self.tokenizer.model_max_length).to(self.device)
+        input_ids = self.tokenizer(
+            samples["caption"],
+            padding="do_not_pad",
+            truncation=True,
+            max_length=self.tokenizer.model_max_length,
+            return_tensors="pt",
+        ).input_ids.to(self.device)
         encoder_hidden_states = self.text_encoder(
             input_ids=input_ids,
             ctx_embeddings=ctx_embeddings,
@@ -403,7 +401,7 @@ class BlipDiffusion(BaseModel):
         image = tform(image).unsqueeze(0).to(self.device)
         return 2.0 * image - 1.0
 
-    @torch.no_grad()
+    # @torch.no_grad()
     def edit(
         self,
         samples,
@@ -416,19 +414,11 @@ class BlipDiffusion(BaseModel):
         num_inversion_steps=50,
         neg_prompt="",
     ):
+        # torch.Tensor of shape torch.Size([1, 3, 512, 512]) -> PIL.Image.Image
         raw_image = samples["raw_image"] # PIL.Image.Image
-        # raw_image = self._inversion_transform(raw_image) # torch.Tensor of shape torch.Size([1, 3, 512, 512])
 
-        # latents = self.get_image_latents(raw_image, rng_generator=None)
-        # prompt = self._build_prompt(
-        #     prompts=prompt,
-        #     tgt_subjects=samples["src_subject"],
-        #     prompt_strength=1.0,
-        #     prompt_reps=1,
-        # )
-        prompt = f'a {samples["src_subject"]} {samples["prompt"]}'
+        prompt = f'a {samples["src_subject"]} {samples["prompt"][0].strip()}'
 
-        # self.prompt, self.context
         null_inversion = NullInversion(device=self.device,
                                        scheduler=self.ddim_scheduler,
                                        tokenizer=self.tokenizer, 
@@ -441,55 +431,10 @@ class BlipDiffusion(BaseModel):
 
         (image_gt, image_enc), x_t, uncond_embeddings = null_inversion.invert(raw_image, prompt, verbose=True)
 
-        # inv_latents = self._ddim_inverse(
-        #     samples=samples,
-        #     latents=latents,
-        #     seed=seed,
-        #     guidance_scale=1.0,
-        #     height=height,
-        #     width=width,
-        #     num_inference_steps=num_inversion_steps,
-        # )
-
-        # def _init_latent(self, latent, height, width, generator, batch_size):
-        #     if latent is None:
-        #         latent = torch.randn(
-        #             (1, self.unet.in_channels, height // 8, width // 8),
-        #             generator=generator,
-        #             device=generator.device,
-        #         )
-        #     latent = latent.expand(
-        #         batch_size,
-        #         self.unet.in_channels,
-        #         height // 8,
-        #         width // 8,
-        #     )
-        #     return latent.to(self.device)
-
-        # prompts = [prompt]
-        # controller = AttentionStore()
-        # image_inv, x_t = run_and_display(prompts, controller, run_baseline=False, latent=x_t, uncond_embeddings=uncond_embeddings, verbose=False)
-        # print("showing from left to right: the ground truth image, the vq-autoencoder reconstruction, the null-text inverted image")
-        # ptp_utils.view_images([image_gt, image_enc, image_inv[0]])
-        # show_cross_attention(controller, 16, ["up", "down"])
-
-
-        # recon_image = self.generate_then_edit(
-        #     samples=samples,
-        #     latents=inv_latents,
-        #     seed=seed,
-        #     neg_prompt=neg_prompt,
-        #     guidance_scale=guidance_scale,
-        #     height=height,
-        #     width=width,
-        #     num_inference_steps=num_inference_steps,
-        #     use_inversion=True,
-        #     lb_threshold=lb_threshold,
-        # )
-
+        # inv_latents -> x_t
         recon_image = self.generate_then_edit(
             samples=samples,
-            latents=image_enc,
+            latents=x_t,
             seed=seed,
             neg_prompt=neg_prompt,
             guidance_scale=guidance_scale,
@@ -803,7 +748,7 @@ class BlipDiffusion(BaseModel):
         # set timesteps
         scheduler.set_timesteps(num_inference_steps)
 
-        iterator = tqdm.tqdm(scheduler.timesteps)
+        iterator = tqdm(scheduler.timesteps)
 
         for i, t in enumerate(iterator):
             latents = self._denoise_latent_step(
@@ -1108,6 +1053,7 @@ def load_512(image_path, left=0, right=0, top=0, bottom=0):
 
 
 class NullInversion:
+    # changed
     def __init__(self, device, scheduler, tokenizer, text_encoder, vae, unet, noise_scheduler, prompt=None, context=None, num_ddim_steps=50, guidance_scale=7.5):
         self.device = device
         self.scheduler = scheduler
@@ -1120,15 +1066,7 @@ class NullInversion:
         self.context = context
         self.num_ddim_steps = num_ddim_steps
         self.guidance_scale = guidance_scale
-
-    # def __init__(self, model):
-    #     scheduler = DDIMScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", clip_sample=False,
-    #                               set_alpha_to_one=False)
-    #     self.model = model
-    #     self.tokenizer = self.model.tokenizer
-    #     self.model.scheduler.set_timesteps(NUM_DDIM_STEPS)
-    #     self.prompt = None
-    #     self.context = None
+        self.scheduler.set_timesteps(num_ddim_steps)
 
     def prev_step(self, model_output: Union[torch.FloatTensor, np.ndarray], timestep: int, sample: Union[torch.FloatTensor, np.ndarray]):
         prev_timestep = timestep - self.scheduler.config.num_train_timesteps // self.scheduler.num_inference_steps
@@ -1191,28 +1129,22 @@ class NullInversion:
                 latents = self.vae.encode(image)['latent_dist'].mean
                 latents = latents * 0.18215
         return latents
-    
-    # uncond_input = self.tokenizer(
-        # "", padding="max_length", max_length=self.tokenizer.model_max_length,
-        # return_tensors="pt"
-    # )
-
-    # text_input = self.tokenizer(
-    #     prompt,
-    #     padding="max_length",
-    #     max_length=self.tokenizer.model_max_length,
-    #     truncation=True,
-    #     return_tensors="pt",
-    # )
 
     @torch.no_grad()
     def init_prompt(self, prompt: str):
-        uncond_input_ids = self.tokenizer.encode("", padding="max_length", max_length=self.tokenizer.model_max_length, return_tensors="pt").to(self.device)
-        uncond_embeddings = self.text_encoder(uncond_input_ids)[0]
-
-        text_input_ids = self.tokenizer.encode(prompt, padding="max_length", max_length=self.tokenizer.model_max_length, truncation=True, return_tensors="pt").to(self.device)
-        text_embeddings = self.text_encoder(text_input_ids)[0]
-        
+        uncond_input = self.tokenizer(
+            [""], padding="max_length", max_length=self.tokenizer.model_max_length,
+            return_tensors="pt"
+        )
+        uncond_embeddings = self.text_encoder(input_ids=uncond_input.input_ids.to(self.device), ctx_embeddings=None)[0]
+        text_input = self.tokenizer(
+            [prompt],
+            padding="max_length",
+            max_length=self.tokenizer.model_max_length,
+            truncation=True,
+            return_tensors="pt",
+        )
+        text_embeddings = self.text_encoder(input_ids=text_input.input_ids.to(self.device), ctx_embeddings=None)[0]
         self.context = torch.cat([uncond_embeddings, text_embeddings])
         self.prompt = prompt
 
@@ -1292,65 +1224,3 @@ class NullInversion:
     @scheduler.setter
     def scheduler(self, new_scheduler):
         self._scheduler = new_scheduler
-
-
-# @torch.no_grad()
-# def text2image_ldm_stable(
-#     model,
-#     prompt:  List[str],
-#     controller,
-#     num_inference_steps: int = 50,
-#     guidance_scale: Optional[float] = 7.5,
-#     generator: Optional[torch.Generator] = None,
-#     latent: Optional[torch.FloatTensor] = None,
-#     uncond_embeddings=None,
-#     start_time=50,
-#     return_type='image'
-# ):
-#     batch_size = len(prompt)
-#     register_attention_control(model, controller)
-#     height = width = 512
-    
-#     text_input = model.tokenizer(
-#         prompt,
-#         padding="max_length",
-#         max_length=model.tokenizer.model_max_length,
-#         truncation=True,
-#         return_tensors="pt",
-#     )
-#     text_embeddings = model.text_encoder(text_input.input_ids.to(model.device))[0]
-#     max_length = text_input.input_ids.shape[-1]
-#     if uncond_embeddings is None:
-#         uncond_input = model.tokenizer(
-#             [""] * batch_size, padding="max_length", max_length=max_length, return_tensors="pt"
-#         )
-#         uncond_embeddings_ = model.text_encoder(uncond_input.input_ids.to(model.device))[0]
-#     else:
-#         uncond_embeddings_ = None
-
-#     latent, latents = init_latent(latent, model, height, width, generator, batch_size)
-#     model.scheduler.set_timesteps(num_inference_steps)
-#     for i, t in enumerate(tqdm(model.scheduler.timesteps[-start_time:])):
-#         if uncond_embeddings_ is None:
-#             context = torch.cat([uncond_embeddings[i].expand(*text_embeddings.shape), text_embeddings])
-#         else:
-#             context = torch.cat([uncond_embeddings_, text_embeddings])
-#         latents = diffusion_step(model, controller, latents, context, t, guidance_scale, low_resource=False)
-        
-#     if return_type == 'image':
-#         image = latent2image(model.vae, latents)
-#     else:
-#         image = latents
-#     return image, latent
-
-
-
-# def run_and_display(prompts, controller, latent=None, run_baseline=False, generator=None, uncond_embeddings=None, verbose=True):
-#     if run_baseline:
-#         print("w.o. prompt-to-prompt")
-#         images, latent = run_and_display(prompts, EmptyControl(), latent=latent, run_baseline=False, generator=generator)
-#         print("with prompt-to-prompt")
-#     images, x_t = text2image_ldm_stable(ldm_stable, prompts, controller, latent=latent, num_inference_steps=NUM_DDIM_STEPS, guidance_scale=GUIDANCE_SCALE, generator=generator, uncond_embeddings=uncond_embeddings)
-#     if verbose:
-#         view_images(images)
-#     return images, x_t
